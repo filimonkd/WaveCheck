@@ -1,0 +1,23 @@
+{
+  "name": "wavecheck-hardware-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reads RFID credentials from a serial reader and checks attendees in through the WaveCheck API.",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "tsc && node dist/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.0",
+    "serialport": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
