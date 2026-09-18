@@ -89,6 +89,9 @@ model CustomField {
   label      String
   type       CustomFieldType
   isRequired Boolean         @default(false)
+  // Choices for DROPDOWN fields, as a JSON array of strings. Empty for
+  // TEXT and BOOLEAN fields.
+  options    Json            @default("[]")
 
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
