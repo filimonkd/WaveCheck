@@ -20,6 +20,7 @@ Event / conference registration system. **Phase 1 is software only**; the
 ```
 app/dashboard/               organizer dashboard (RSC) + Server Action
 app/kiosk/                   check-in terminal (client component)
+hardware-bridge/             standalone serial RFID bridge (own package.json)
 app/register/[eventId]/      public registration page (RSC) + client form
 app/api/auth/[...nextauth]/  Auth.js route handler
 app/api/events/              GET (public) + POST (organizers)
@@ -212,6 +213,27 @@ re-enabled. Without that the next tap would go nowhere.
 selected event and checks one in directly. It posts the *registration id*, not
 the credential token: the search endpoint never returns tokens, since the token
 is the credential and the endpoint is unauthenticated.
+
+### Phase 2: hardware integration
+
+Physical readers are supported. Which part of WaveCheck you need depends on
+what the reader pretends to be:
+
+| Reader | Behaviour | Use |
+| --- | --- | --- |
+| USB HID "keyboard wedge" | Types the UID and presses Enter | `/kiosk` in a browser — nothing to install |
+| USB serial / UART | Appears as `/dev/ttyUSB0` or `COM3` | [`hardware-bridge/`](hardware-bridge/README.md) |
+
+[`hardware-bridge/`](hardware-bridge/README.md) is a standalone Node project
+that runs on the machine at the door, reads credentials off a serial reader
+and posts them to `/api/hardware/check-in` with this device's key. It has its
+own `package.json` and toolchain and is excluded from the app's TypeScript and
+ESLint projects, so the two build independently.
+
+Its README covers wiring (including why an MFRC522 breakout needs a UART
+jumper or a microcontroller in front of it), getting a device key from the
+dashboard, running it under systemd, and testing the whole path with `socat`
+virtual serial ports instead of hardware.
 
 ### Hardware security
 
