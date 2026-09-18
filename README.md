@@ -19,6 +19,7 @@ Event / conference registration system. **Phase 1 is software only**; the
 
 ```
 app/dashboard/               organizer dashboard (RSC) + Server Action
+app/kiosk/                   check-in terminal (client component)
 app/register/[eventId]/      public registration page (RSC) + client form
 app/api/auth/[...nextauth]/  Auth.js route handler
 app/api/events/              GET (public) + POST (organizers)
@@ -101,7 +102,10 @@ while they still organize events — reassign or archive those first.
 | `GET /api/events`         | public                  | List published events          |
 | `POST /api/events`        | ORGANIZER / ADMIN       | Create an event + custom fields|
 | `POST /api/registrations` | public (see below)      | Register an attendee, signing them up if new |
-| `POST /api/hardware/check-in` | none (see below)    | Kiosk check-in by credential   |
+| `POST /api/hardware/check-in` | none (see below)    | Check in by credential token or registration id |
+| `POST /api/hardware/heartbeat` | none (see below)  | Register a kiosk and mark it ACTIVE |
+| `GET /api/hardware/events` | none (see below)      | Published events with live check-in tallies |
+| `GET /api/hardware/registrations` | none (see below) | Name/email lookup for manual check-in |
 
 ### Checking someone in
 
@@ -131,6 +135,7 @@ marks it `ACTIVE`.
 | ---------------------- | ------------------ | --------------------------------------------- |
 | `/dashboard`           | ORGANIZER / ADMIN  | Lists events and creates them via a Server Action |
 | `/register/[eventId]`  | public             | Sign-up form for a published event            |
+| `/kiosk`               | public             | Check-in terminal for the entrance tablet      |
 
 The dashboard is a Server Component that queries Prisma directly. An organizer
 sees the events they own; an admin sees all of them. `createEvent` in
@@ -142,6 +147,42 @@ not enough — then writes the event and calls `revalidatePath('/dashboard')`.
 anything else, so draft and archived events do not leak. Its client form posts
 to `/api/registrations` and shows the returned `credentialToken`, which is
 what the kiosk scans.
+
+## Kiosk
+
+`/kiosk` is the terminal that runs on a tablet at the entrance. It is a client
+component and deliberately unauthenticated — it is a standalone appliance, not
+a staff login — so `proxy.ts` does not cover it.
+
+Using it:
+
+1. Open `/kiosk`, enter a **Device Identifier** (for example `KIOSK-001`) and
+   an optional location, then press **Connect**. That calls
+   `POST /api/hardware/heartbeat`, which creates the `Device` row if it is new
+   and marks it `ACTIVE`. The kiosk then re-sends a heartbeat every 60 seconds
+   so `lastHeartbeatAt` stays meaningful.
+2. Pick the event being checked in. The header shows
+   `Checked In: X / Y Total Registrations`, refreshed after every scan.
+   Cancelled registrations are excluded from Y.
+3. Scan a badge. The token field is focused on entry and re-focused after
+   every scan, so an unattended terminal is always ready for the next tap.
+
+### How this simulates Phase 2 hardware
+
+A keyboard-wedge RFID reader behaves like a very fast keyboard: it types the
+credential and presses Enter. The token field is therefore an ordinary text
+input inside a `<form>`, so the reader's Enter submits it with no key handling
+of its own — the same code path a human typing a token uses. When real readers
+arrive they need no application change; they just type into the focused field.
+
+Because the field is disabled while a check-in is in flight, and a disabled
+element cannot take focus, the focus effect also re-runs when the field is
+re-enabled. Without that the next tap would go nowhere.
+
+**Manual fallback.** "Search by Email/Name" looks up registrations for the
+selected event and checks one in directly. It posts the *registration id*, not
+the credential token: the search endpoint never returns tokens, since the token
+is the credential and the endpoint is unauthenticated.
 
 ## CI
 
@@ -183,10 +224,14 @@ These are deliberate MVP shortcuts, not oversights:
   the key `dietaryRestriction`, while the API checks an event's *required*
   fields by `CustomField.id`. So an event with required custom fields will
   reject this form until it renders the event's real fields.
-- **`POST /api/hardware/check-in` is unauthenticated.** `deviceIdentifier` is
-  an identifier, not a secret, so anyone who can reach the endpoint and guess
-  a credential token can check someone in. Give `Device` a hashed API key and
-  require it before Phase 2 hardware ships.
+- **The whole `/api/hardware` surface is unauthenticated.**
+  `deviceIdentifier` is an identifier, not a secret. Anyone who can reach
+  these endpoints can check people in, create `Device` rows, read attendance
+  tallies, and — most seriously — **look up attendee names and emails** via
+  `GET /api/hardware/registrations`. The search requires 3 characters and caps
+  results at 10, which slows bulk enumeration but does not prevent it. Give
+  `Device` a hashed API key and require it on every `/api/hardware` route
+  before this is exposed to a venue network.
 - **`attendeeName` falls back to the attendee's email** when `User.name` is
   null, since the name is optional.
 - **Passwords use scrypt, not bcrypt.** `lib/password.ts` is the only place
