@@ -1,11 +1,14 @@
 "use server";
 
+import { randomBytes } from "node:crypto";
+
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { EventStatus, Role } from "@/lib/generated/prisma/enums";
+import { DeviceStatus, EventStatus, Role } from "@/lib/generated/prisma/enums";
+import { hashPassword } from "@/lib/password";
 
 const ORGANIZER_ROLES: Role[] = [Role.ORGANIZER, Role.ADMIN];
 
@@ -89,4 +92,101 @@ export async function createEvent(
   revalidatePath("/dashboard");
 
   return { status: "success", message: `Created "${event.title}".` };
+}
+
+export type GenerateCredentialsState = {
+  status: "idle" | "error" | "success";
+  message?: string;
+  fieldErrors?: Record<string, string>;
+  /** Present exactly once, on the response that created the device. */
+  credentials?: {
+    deviceIdentifier: string;
+    locationName: string;
+    apiKey: string;
+  };
+};
+
+const generateCredentialsSchema = z.object({
+  deviceIdentifier: z.string().trim().min(1).max(200).optional(),
+  locationName: z.string().trim().min(1, "Location is required").max(200),
+});
+
+/**
+ * Issues credentials for a new kiosk.
+ *
+ * The key is returned in plain text on this response and never again — only
+ * its scrypt hash is stored, so a leaked database cannot be used to
+ * impersonate a terminal. Losing the key means issuing a new device.
+ */
+export async function generateDeviceCredentials(
+  _previousState: GenerateCredentialsState,
+  formData: FormData,
+): Promise<GenerateCredentialsState> {
+  const session = await auth();
+
+  if (!session?.user) {
+    return { status: "error", message: "You need to sign in first." };
+  }
+
+  if (!ORGANIZER_ROLES.includes(session.user.role)) {
+    return {
+      status: "error",
+      message: "Only organizers and admins can provision kiosks.",
+    };
+  }
+
+  const parsed = generateCredentialsSchema.safeParse({
+    deviceIdentifier: formData.get("deviceIdentifier") || undefined,
+    locationName: formData.get("locationName"),
+  });
+
+  if (!parsed.success) {
+    const fieldErrors: Record<string, string> = {};
+
+    for (const issue of parsed.error.issues) {
+      fieldErrors[issue.path.join(".")] ??= issue.message;
+    }
+
+    return {
+      status: "error",
+      message: "Please correct the highlighted fields.",
+      fieldErrors,
+    };
+  }
+
+  const deviceIdentifier =
+    parsed.data.deviceIdentifier ??
+    `KIOSK-${randomBytes(4).toString("hex").toUpperCase()}`;
+
+  const existing = await db.device.findUnique({ where: { deviceIdentifier } });
+
+  if (existing) {
+    return {
+      status: "error",
+      message: `A device called "${deviceIdentifier}" already exists. Key rotation is not supported yet — choose another identifier.`,
+    };
+  }
+
+  // 256 bits from a CSPRNG. base64url keeps it safe to paste into a header.
+  const apiKey = randomBytes(32).toString("base64url");
+
+  await db.device.create({
+    data: {
+      deviceIdentifier,
+      locationName: parsed.data.locationName,
+      apiKeyHash: await hashPassword(apiKey),
+      // OFFLINE until the kiosk actually reports in.
+      status: DeviceStatus.OFFLINE,
+    },
+  });
+
+  return {
+    status: "success",
+    message: "Copy the key now — it cannot be shown again.",
+    credentials: {
+      deviceIdentifier,
+      locationName: parsed.data.locationName,
+      apiKey,
+    },
+  };
 }

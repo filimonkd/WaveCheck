@@ -16,7 +16,14 @@ import { SESSION_COOKIE_NAMES } from "@/lib/session-cookie";
  * to be named `proxy` (or be the default export).
  */
 
-/** Exempt regardless of method: sign-in itself, and the Phase 2 kiosks. */
+/**
+ * Exempt from the *session* check: sign-in itself, and the kiosks.
+ *
+ * `/api/hardware` is not public — every route there authenticates the device
+ * from its headers. It is exempt here because a kiosk is an appliance with no
+ * user session, so the cookie check would reject it before it could present
+ * its own credentials.
+ */
 const PUBLIC_API_PREFIXES = ["/api/auth/", "/api/hardware/"];
 
 /** Exempt only for the listed method. */

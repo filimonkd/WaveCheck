@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { db } from "@/lib/db";
 import { EventStatus, RegistrationStatus } from "@/lib/generated/prisma/enums";
+import { validateDeviceAuth } from "@/lib/hardware-auth";
 
 /**
  * Published events with their live check-in tallies, for the kiosk's event
@@ -9,9 +10,15 @@ import { EventStatus, RegistrationStatus } from "@/lib/generated/prisma/enums";
  *
  * Separate from the public `GET /api/events` on purpose: attendance numbers
  * are operational data and do not belong on the endpoint the marketing pages
- * would use.
+ * would use. Requires device credentials.
  */
-export async function GET() {
+export async function GET(request: Request) {
+  const auth = await validateDeviceAuth(request);
+
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   const events = await db.event.findMany({
     where: { status: EventStatus.PUBLISHED },
     orderBy: { startTime: "asc" },

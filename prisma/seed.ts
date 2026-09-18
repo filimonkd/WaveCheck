@@ -15,6 +15,7 @@ import { hashPassword } from "../lib/password";
 const DEMO_PASSWORD = "password123";
 const DEMO_CREDENTIAL_TOKEN = "demo-credential-0001";
 const DEMO_DEVICE_IDENTIFIER = "KIOSK-001";
+const DEMO_DEVICE_API_KEY = "demo-kiosk-api-key-0001";
 
 async function main() {
   const passwordHash = await hashPassword(DEMO_PASSWORD);
@@ -89,13 +90,18 @@ async function main() {
     },
   });
 
+  // Hashed on update too, so re-seeding a database created before device
+  // authentication existed gives the demo kiosk working credentials.
+  const apiKeyHash = await hashPassword(DEMO_DEVICE_API_KEY);
+
   await db.device.upsert({
     where: { deviceIdentifier: DEMO_DEVICE_IDENTIFIER },
-    update: {},
+    update: { apiKeyHash },
     create: {
       deviceIdentifier: DEMO_DEVICE_IDENTIFIER,
       locationName: "Main Entrance",
       status: DeviceStatus.OFFLINE,
+      apiKeyHash,
     },
   });
 
@@ -103,7 +109,7 @@ async function main() {
   console.log(`  organizer  Demo Organizer <organizer@wavecheck.test> / ${DEMO_PASSWORD}`);
   console.log(`  attendee   Demo Attendee <attendee@wavecheck.test> / ${DEMO_PASSWORD}`);
   console.log(`  event      ${event.id}`);
-  console.log(`  device     ${DEMO_DEVICE_IDENTIFIER}`);
+  console.log(`  device     ${DEMO_DEVICE_IDENTIFIER} / ${DEMO_DEVICE_API_KEY}`);
   console.log(`  credential ${DEMO_CREDENTIAL_TOKEN}`);
 }
 
