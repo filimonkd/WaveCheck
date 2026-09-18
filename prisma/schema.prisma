@@ -52,6 +52,8 @@ enum DeviceStatus {
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
+  // Display name shown at check-in; optional, so callers fall back to email.
+  name         String?
   passwordHash String
   role         Role     @default(ATTENDEE)
   createdAt    DateTime @default(now())

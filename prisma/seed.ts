@@ -21,9 +21,11 @@ async function main() {
 
   const organizer = await db.user.upsert({
     where: { email: "organizer@wavecheck.test" },
-    update: {},
+    // Named on update too, so re-seeding an existing database backfills it.
+    update: { name: "Demo Organizer" },
     create: {
       email: "organizer@wavecheck.test",
+      name: "Demo Organizer",
       passwordHash,
       role: Role.ORGANIZER,
     },
@@ -31,9 +33,10 @@ async function main() {
 
   const attendee = await db.user.upsert({
     where: { email: "attendee@wavecheck.test" },
-    update: {},
+    update: { name: "Demo Attendee" },
     create: {
       email: "attendee@wavecheck.test",
+      name: "Demo Attendee",
       passwordHash,
       role: Role.ATTENDEE,
     },
@@ -97,8 +100,8 @@ async function main() {
   });
 
   console.log("Seeded:");
-  console.log(`  organizer  organizer@wavecheck.test / ${DEMO_PASSWORD}`);
-  console.log(`  attendee   attendee@wavecheck.test / ${DEMO_PASSWORD}`);
+  console.log(`  organizer  Demo Organizer <organizer@wavecheck.test> / ${DEMO_PASSWORD}`);
+  console.log(`  attendee   Demo Attendee <attendee@wavecheck.test> / ${DEMO_PASSWORD}`);
   console.log(`  event      ${event.id}`);
   console.log(`  device     ${DEMO_DEVICE_IDENTIFIER}`);
   console.log(`  credential ${DEMO_CREDENTIAL_TOKEN}`);
