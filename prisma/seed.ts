@@ -58,23 +58,55 @@ async function main() {
         endTime: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000),
         maxCapacity: 100,
         status: EventStatus.PUBLISHED,
-        customFields: {
-          create: [
-            {
-              label: "Dietary requirements",
-              type: CustomFieldType.DROPDOWN,
-              isRequired: false,
-              options: ["None", "Vegetarian", "Vegan", "Gluten-free"],
-            },
-            {
-              label: "Job title",
-              type: CustomFieldType.TEXT,
-              isRequired: false,
-            },
-          ],
-        },
       },
     }));
+
+  /**
+   * One field of each type, so the registration form's dynamic rendering has
+   * something to exercise. Fixed ids keep re-seeding idempotent: responses
+   * already stored against these keys stay meaningful.
+   */
+  const customFields = [
+    {
+      id: "demo-field-diet",
+      label: "Dietary requirements",
+      type: CustomFieldType.DROPDOWN,
+      isRequired: true,
+      options: ["None", "Vegetarian", "Vegan", "Gluten-free"],
+    },
+    {
+      id: "demo-field-job",
+      label: "Job title",
+      type: CustomFieldType.TEXT,
+      isRequired: false,
+      options: [],
+    },
+    {
+      id: "demo-field-updates",
+      label: "Email me about future events",
+      type: CustomFieldType.BOOLEAN,
+      isRequired: false,
+      options: [],
+    },
+  ];
+
+  // Drop any fields this seed no longer owns, so an older database converges.
+  await db.customField.deleteMany({
+    where: {
+      eventId: event.id,
+      id: { notIn: customFields.map((field) => field.id) },
+    },
+  });
+
+  for (const field of customFields) {
+    const { id, ...data } = field;
+
+    await db.customField.upsert({
+      where: { id },
+      update: data,
+      create: { id, eventId: event.id, ...data },
+    });
+  }
 
   await db.registration.upsert({
     where: {
@@ -109,6 +141,7 @@ async function main() {
   console.log(`  organizer  Demo Organizer <organizer@wavecheck.test> / ${DEMO_PASSWORD}`);
   console.log(`  attendee   Demo Attendee <attendee@wavecheck.test> / ${DEMO_PASSWORD}`);
   console.log(`  event      ${event.id}`);
+  console.log(`  fields     ${customFields.map((f) => `${f.id} (${f.type})`).join(", ")}`);
   console.log(`  device     ${DEMO_DEVICE_IDENTIFIER} / ${DEMO_DEVICE_API_KEY}`);
   console.log(`  credential ${DEMO_CREDENTIAL_TOKEN}`);
 }

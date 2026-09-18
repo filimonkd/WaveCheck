@@ -103,7 +103,7 @@ while they still organize events — reassign or archive those first.
 | ------------------------- | ----------------------- | ------------------------------ |
 | `GET /api/events`         | public                  | List published events          |
 | `POST /api/events`        | ORGANIZER / ADMIN       | Create an event + custom fields|
-| `POST /api/registrations` | public (see below)      | Register an attendee, signing them up if new |
+| `POST /api/registrations` | public, self-identifying | Register an attendee, signing them up if new |
 | `POST /api/hardware/check-in` | device key          | Check in by credential token or registration id |
 | `POST /api/hardware/heartbeat` | device key         | Mark a kiosk ACTIVE |
 | `GET /api/hardware/events` | device key            | Published events with live check-in tallies |
@@ -136,6 +136,24 @@ swallow the message meant for the screen. Only a malformed body is a 400.
 
 A known `deviceIdentifier` also updates that `Device`'s `lastHeartbeatAt` and
 marks it `ACTIVE`.
+
+## Registering
+
+`POST /api/registrations` is public, so the request has to prove who is
+registering. The body carries `attendee` — name, email and password. A new
+email creates the account; an email that already exists must supply the
+matching password. There is no way to name an existing user by id, so the
+endpoint cannot be used to register somebody else.
+
+`/register/[eventId]` renders the event's `CustomField` rows rather than a
+fixed set of questions: `TEXT` becomes a text input, `DROPDOWN` a native
+`<select>` built from the field's `options`, and `BOOLEAN` a checkbox. Each
+input's `name` is the `CustomField.id`, which is the key the API validates
+required answers against, so `customFieldResponses` lines up by construction.
+
+An unticked checkbox submits `false` rather than nothing, so a boolean field
+always counts as answered — matching the API, which treats `undefined`, `null`
+and `""` as missing and `false` as a real answer.
 
 ## Pages
 
@@ -255,14 +273,6 @@ expects `Account`, `Session` and `VerificationToken` models plus Auth.js's own
 
 These are deliberate MVP shortcuts, not oversights:
 
-- **`POST /api/registrations` is public.** Signing up inline is safe — an
-  existing email must prove itself with the matching password — but the older
-  `attendeeId` path takes a bare user id, so anyone can still register anyone.
-  Drop `attendeeId` or require a session before this goes anywhere public.
-- **The registration form's dietary field is hardcoded.** It is stored under
-  the key `dietaryRestriction`, while the API checks an event's *required*
-  fields by `CustomField.id`. So an event with required custom fields will
-  reject this form until it renders the event's real fields.
 - **There is no key rotation.** Provisioning refuses an identifier that
   already exists, so a lost key means issuing a new device rather than
   re-keying the old one. Deleting the `Device` row revokes access.
