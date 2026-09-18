@@ -6,14 +6,62 @@ import { z } from "zod";
 import { apiError, isUniqueViolation, readJson, validationError } from "@/lib/api";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { EventStatus, RegistrationStatus } from "@/lib/generated/prisma/enums";
+import { EventStatus, Role, RegistrationStatus } from "@/lib/generated/prisma/enums";
+import { hashPassword, verifyPassword } from "@/lib/password";
+
+/**
+ * Sign-up details for the public registration page, which registers someone
+ * who has no account yet. An existing email must prove ownership with the
+ * matching password, so this cannot be used to register on someone's behalf.
+ */
+const attendeeSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  email: z.string().email(),
+  password: z.string().min(8, "Password must be at least 8 characters"),
+});
 
 const createRegistrationSchema = z.object({
   eventId: z.string().min(1),
-  // Only consulted when the request has no session. See the note below.
+  // Both are only consulted when the request has no session.
   attendeeId: z.string().min(1).optional(),
+  attendee: attendeeSchema.optional(),
   customFieldResponses: z.record(z.string(), z.json()).default({}),
 });
+
+type AttendeeInput = z.infer<typeof attendeeSchema>;
+
+type AttendeeResolution =
+  | { ok: true; id: string }
+  | { ok: false; error: string };
+
+/** Find the account for these credentials, creating it the first time. */
+async function findOrCreateAttendee(
+  input: AttendeeInput,
+): Promise<AttendeeResolution> {
+  const existing = await db.user.findUnique({ where: { email: input.email } });
+
+  if (!existing) {
+    const created = await db.user.create({
+      data: {
+        email: input.email,
+        name: input.name,
+        passwordHash: await hashPassword(input.password),
+        role: Role.ATTENDEE,
+      },
+    });
+
+    return { ok: true, id: created.id };
+  }
+
+  if (!(await verifyPassword(input.password, existing.passwordHash))) {
+    return {
+      ok: false,
+      error: "That email already has an account; the password did not match",
+    };
+  }
+
+  return { ok: true, id: existing.id };
+}
 
 /** Registrations that hold a seat. Cancelled ones free their seat up again. */
 const SEAT_HOLDING = [
@@ -31,21 +79,37 @@ export async function POST(request: Request) {
   const { eventId, customFieldResponses } = parsed.data;
   const session = await auth();
 
-  // This route is currently public, so an unauthenticated caller has to name
-  // the attendee. That means anyone can register anyone; see README before
-  // exposing this beyond the MVP.
-  const attendeeId = session?.user?.id ?? parsed.data.attendeeId;
+  // This route is public, so an unauthenticated caller identifies the
+  // attendee itself: either by signing up inline (`attendee`, password
+  // checked) or by naming an existing `attendeeId`. The latter lets anyone
+  // register anyone; see README before exposing this beyond the MVP.
+  let attendeeId = session?.user?.id;
+
+  if (!attendeeId && parsed.data.attendee) {
+    const resolved = await findOrCreateAttendee(parsed.data.attendee);
+
+    if (!resolved.ok) {
+      return apiError(resolved.error, 401);
+    }
+
+    attendeeId = resolved.id;
+  }
+
+  attendeeId ??= parsed.data.attendeeId;
 
   if (!attendeeId) {
-    return apiError("attendeeId is required when not signed in", 400);
+    return apiError("Sign in, or supply attendee details, to register", 400);
   }
+
+  // Pinned to a const so the narrowing survives into the transaction closure.
+  const resolvedAttendeeId = attendeeId;
 
   const [event, attendee] = await Promise.all([
     db.event.findUnique({
       where: { id: eventId },
       include: { customFields: true },
     }),
-    db.user.findUnique({ where: { id: attendeeId } }),
+    db.user.findUnique({ where: { id: resolvedAttendeeId } }),
   ]);
 
   if (!event) {
@@ -85,7 +149,7 @@ export async function POST(request: Request) {
       return tx.registration.create({
         data: {
           eventId,
-          attendeeId,
+          attendeeId: resolvedAttendeeId,
           // Opaque credential the Phase 2 kiosks scan.
           credentialToken: randomUUID(),
           status: RegistrationStatus.REGISTERED,
