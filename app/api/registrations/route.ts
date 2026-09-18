@@ -4,7 +4,6 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { apiError, isUniqueViolation, readJson, validationError } from "@/lib/api";
-import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { EventStatus, Role, RegistrationStatus } from "@/lib/generated/prisma/enums";
 import { hashPassword, verifyPassword } from "@/lib/password";
@@ -22,9 +21,10 @@ const attendeeSchema = z.object({
 
 const createRegistrationSchema = z.object({
   eventId: z.string().min(1),
-  // Both are only consulted when the request has no session.
-  attendeeId: z.string().min(1).optional(),
-  attendee: attendeeSchema.optional(),
+  // The only way to say who is registering. There used to be a bare
+  // `attendeeId` here, which let any caller register any user by id; naming
+  // an account now means proving you hold its password.
+  attendee: attendeeSchema,
   customFieldResponses: z.record(z.string(), z.json()).default({}),
 });
 
@@ -77,47 +77,26 @@ export async function POST(request: Request) {
   }
 
   const { eventId, customFieldResponses } = parsed.data;
-  const session = await auth();
 
-  // This route is public, so an unauthenticated caller identifies the
-  // attendee itself: either by signing up inline (`attendee`, password
-  // checked) or by naming an existing `attendeeId`. The latter lets anyone
-  // register anyone; see README before exposing this beyond the MVP.
-  let attendeeId = session?.user?.id;
+  // The route is public, so identity has to be proved on the request itself:
+  // either the email is new, or its password matches.
+  const resolved = await findOrCreateAttendee(parsed.data.attendee);
 
-  if (!attendeeId && parsed.data.attendee) {
-    const resolved = await findOrCreateAttendee(parsed.data.attendee);
-
-    if (!resolved.ok) {
-      return apiError(resolved.error, 401);
-    }
-
-    attendeeId = resolved.id;
+  if (!resolved.ok) {
+    return apiError(resolved.error, 401);
   }
 
-  attendeeId ??= parsed.data.attendeeId;
+  const resolvedAttendeeId = resolved.id;
 
-  if (!attendeeId) {
-    return apiError("Sign in, or supply attendee details, to register", 400);
-  }
-
-  // Pinned to a const so the narrowing survives into the transaction closure.
-  const resolvedAttendeeId = attendeeId;
-
-  const [event, attendee] = await Promise.all([
-    db.event.findUnique({
-      where: { id: eventId },
-      include: { customFields: true },
-    }),
-    db.user.findUnique({ where: { id: resolvedAttendeeId } }),
-  ]);
+  // No separate attendee lookup: findOrCreateAttendee already returned a real
+  // user, either freshly created or password-verified.
+  const event = await db.event.findUnique({
+    where: { id: eventId },
+    include: { customFields: true },
+  });
 
   if (!event) {
     return apiError("Event not found", 404);
-  }
-
-  if (!attendee) {
-    return apiError("Attendee not found", 404);
   }
 
   if (event.status !== EventStatus.PUBLISHED) {

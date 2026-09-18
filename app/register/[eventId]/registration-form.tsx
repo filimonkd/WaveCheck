@@ -4,23 +4,51 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { CustomFieldType } from "@/lib/generated/prisma/enums";
 
-/**
- * Key the dietary answer is stored under in `Registration.customFieldResponses`.
- *
- * The API keys responses by `CustomField.id` when it checks an event's
- * required fields, so this hardcoded field is stored alongside rather than
- * satisfying one. An event with required custom fields will be rejected until
- * this form renders the event's real fields.
- */
-const DIETARY_RESPONSE_KEY = "dietaryRestriction";
+export type RegistrationField = {
+  id: string;
+  label: string;
+  type: CustomFieldType;
+  isRequired: boolean;
+  /** Choices for DROPDOWN fields; empty for the other types. */
+  options: string[];
+};
 
 type FormState =
   | { status: "idle" | "submitting" }
   | { status: "error"; message: string }
   | { status: "success"; credentialToken: string };
 
-export function RegistrationForm({ eventId }: { eventId: string }) {
+const SELECT_CLASS =
+  "border-input bg-background ring-offset-background focus-visible:ring-ring flex h-10 w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none";
+
+/**
+ * Reads one custom field out of the submitted form.
+ *
+ * A checkbox is absent from FormData when unticked, which is exactly the
+ * "false" case — so booleans always produce an answer, and a required boolean
+ * is satisfied either way. That matches how the API checks required fields:
+ * it rejects undefined, null and "", and `false` is none of those.
+ */
+function readFieldValue(
+  field: RegistrationField,
+  form: FormData,
+): string | boolean {
+  if (field.type === CustomFieldType.BOOLEAN) {
+    return form.get(field.id) !== null;
+  }
+
+  return String(form.get(field.id) ?? "");
+}
+
+export function RegistrationForm({
+  eventId,
+  fields,
+}: {
+  eventId: string;
+  fields: RegistrationField[];
+}) {
   const [state, setState] = useState<FormState>({ status: "idle" });
 
   async function handleSubmit(formEvent: React.FormEvent<HTMLFormElement>) {
@@ -28,6 +56,13 @@ export function RegistrationForm({ eventId }: { eventId: string }) {
     setState({ status: "submitting" });
 
     const form = new FormData(formEvent.currentTarget);
+
+    // Keyed by CustomField.id, which is what the API validates against.
+    const customFieldResponses: Record<string, string | boolean> = {};
+
+    for (const field of fields) {
+      customFieldResponses[field.id] = readFieldValue(field, form);
+    }
 
     try {
       const response = await fetch("/api/registrations", {
@@ -40,9 +75,7 @@ export function RegistrationForm({ eventId }: { eventId: string }) {
             email: String(form.get("email") ?? ""),
             password: String(form.get("password") ?? ""),
           },
-          customFieldResponses: {
-            [DIETARY_RESPONSE_KEY]: String(form.get("dietaryRestriction") ?? ""),
-          },
+          customFieldResponses,
         }),
       });
 
@@ -72,9 +105,7 @@ export function RegistrationForm({ eventId }: { eventId: string }) {
     return (
       <div className="space-y-3" role="status">
         <p className="font-medium">Success! You are registered.</p>
-        <p className="text-muted-foreground text-sm">
-          Your ticket token is:
-        </p>
+        <p className="text-muted-foreground text-sm">Your ticket token is:</p>
         <code className="bg-muted block rounded-md px-3 py-2 font-mono text-sm break-all">
           {state.credentialToken}
         </code>
@@ -127,16 +158,55 @@ export function RegistrationForm({ eventId }: { eventId: string }) {
         </p>
       </div>
 
-      <div className="space-y-1.5">
-        <label htmlFor="dietaryRestriction" className="text-sm font-medium">
-          Dietary Restriction
-        </label>
-        <Input
-          id="dietaryRestriction"
-          name="dietaryRestriction"
-          placeholder="e.g. Vegetarian"
-        />
-      </div>
+      {fields.map((field) => {
+        if (field.type === CustomFieldType.BOOLEAN) {
+          return (
+            <div key={field.id} className="flex items-center gap-2">
+              <input
+                id={field.id}
+                name={field.id}
+                type="checkbox"
+                className="border-input text-primary focus-visible:ring-ring h-4 w-4 rounded border focus-visible:ring-2 focus-visible:ring-offset-2"
+              />
+              <label htmlFor={field.id} className="text-sm font-medium">
+                {field.label}
+              </label>
+            </div>
+          );
+        }
+
+        return (
+          <div key={field.id} className="space-y-1.5">
+            <label htmlFor={field.id} className="text-sm font-medium">
+              {field.label}
+              {field.isRequired ? null : (
+                <span className="text-muted-foreground"> (optional)</span>
+              )}
+            </label>
+
+            {field.type === CustomFieldType.DROPDOWN ? (
+              <select
+                id={field.id}
+                name={field.id}
+                required={field.isRequired}
+                defaultValue=""
+                className={SELECT_CLASS}
+              >
+                <option value="" disabled={field.isRequired}>
+                  Select…
+                </option>
+                {field.options.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <Input id={field.id} name={field.id} required={field.isRequired} />
+            )}
+          </div>
+        );
+      })}
 
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={pending}>
