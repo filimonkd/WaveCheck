@@ -151,8 +151,8 @@ These are deliberate MVP shortcuts, not oversights:
   an identifier, not a secret, so anyone who can reach the endpoint and guess
   a credential token can check someone in. Give `Device` a hashed API key and
   require it before Phase 2 hardware ships.
-- **`attendeeName` returns the attendee's email**, because `User` has no name
-  field yet. Add `name String?` to `User` if the kiosk should show a real name.
+- **`attendeeName` falls back to the attendee's email** when `User.name` is
+  null, since the name is optional.
 - **Passwords use scrypt, not bcrypt.** `lib/password.ts` is the only place
   that knows; hashes are prefixed with their scheme so a later swap can detect
   and re-hash old ones on next sign-in.

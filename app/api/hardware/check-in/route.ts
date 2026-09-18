@@ -51,9 +51,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      // The User model has no display name yet, so the email identifies the
-      // attendee on the kiosk screen.
-      attendeeName: registration?.attendee.email ?? "",
+      // `name` is optional, so fall back to the email as the kiosk label.
+      attendeeName:
+        registration?.attendee.name || registration?.attendee.email || "",
     });
   }
 
