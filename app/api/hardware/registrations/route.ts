@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { validationError } from "@/lib/api";
 import { db } from "@/lib/db";
+import { validateDeviceAuth } from "@/lib/hardware-auth";
 
 const searchSchema = z.object({
   eventId: z.string().min(1),
@@ -17,12 +18,18 @@ const MAX_RESULTS = 10;
  * scan.
  *
  * Deliberately never returns `credentialToken`: that token IS the credential,
- * and this endpoint is unauthenticated. Manual check-in therefore posts the
- * registration id instead. Results are capped and require a 3-character query,
- * but this still exposes attendee names and emails to anyone who can reach it
- * — see README; it needs device authentication before Phase 2.
+ * so even an authenticated kiosk has no reason to hold one it did not scan.
+ * Manual check-in therefore posts the registration id instead. Results are
+ * capped and require a 3-character query, which together with device
+ * authentication keeps this from being an attendee directory.
  */
 export async function GET(request: NextRequest) {
+  const auth = await validateDeviceAuth(request);
+
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   const parsed = searchSchema.safeParse({
     eventId: request.nextUrl.searchParams.get("eventId"),
     q: request.nextUrl.searchParams.get("q"),

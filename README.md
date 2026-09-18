@@ -51,8 +51,10 @@ npm run dev
 
 The seed creates two logins (`organizer@wavecheck.test` and
 `attendee@wavecheck.test`, both with password `password123`), a published
-event, a kiosk `KIOSK-001`, and a registration whose credential token is
-`demo-credential-0001`.
+event, a registration whose credential token is `demo-credential-0001`, and a
+kiosk `KIOSK-001` whose API key is `demo-kiosk-api-key-0001`. That key is a
+fixed development convenience — real kiosks get a random one from the
+dashboard, and it is the only place a key is ever readable.
 
 ## Scripts
 
@@ -102,18 +104,24 @@ while they still organize events — reassign or archive those first.
 | `GET /api/events`         | public                  | List published events          |
 | `POST /api/events`        | ORGANIZER / ADMIN       | Create an event + custom fields|
 | `POST /api/registrations` | public (see below)      | Register an attendee, signing them up if new |
-| `POST /api/hardware/check-in` | none (see below)    | Check in by credential token or registration id |
-| `POST /api/hardware/heartbeat` | none (see below)  | Register a kiosk and mark it ACTIVE |
-| `GET /api/hardware/events` | none (see below)      | Published events with live check-in tallies |
-| `GET /api/hardware/registrations` | none (see below) | Name/email lookup for manual check-in |
+| `POST /api/hardware/check-in` | device key          | Check in by credential token or registration id |
+| `POST /api/hardware/heartbeat` | device key         | Mark a kiosk ACTIVE |
+| `GET /api/hardware/events` | device key            | Published events with live check-in tallies |
+| `GET /api/hardware/registrations` | device key      | Name/email lookup for manual check-in |
 
 ### Checking someone in
 
 ```bash
 curl -X POST http://localhost:3000/api/hardware/check-in \
   -H 'Content-Type: application/json' \
-  -d '{"deviceIdentifier":"KIOSK-001","credentialToken":"demo-credential-0001"}'
+  -H 'x-device-identifier: KIOSK-001' \
+  -H 'x-device-api-key: demo-kiosk-api-key-0001' \
+  -d '{"credentialToken":"demo-credential-0001"}'
 ```
+
+The device comes from the headers, never the body, so a kiosk cannot record a
+check-in against another terminal. `demo-kiosk-api-key-0001` is the seeded
+demo key; real kiosks get theirs from the dashboard.
 
 Every business outcome returns HTTP 200 and a `success` flag, because kiosk
 firmware tends to collapse non-2xx responses into a generic network error and
@@ -156,15 +164,18 @@ a staff login — so `proxy.ts` does not cover it.
 
 Using it:
 
-1. Open `/kiosk`, enter a **Device Identifier** (for example `KIOSK-001`) and
-   an optional location, then press **Connect**. That calls
-   `POST /api/hardware/heartbeat`, which creates the `Device` row if it is new
-   and marks it `ACTIVE`. The kiosk then re-sends a heartbeat every 60 seconds
-   so `lastHeartbeatAt` stays meaningful.
-2. Pick the event being checked in. The header shows
+1. On the dashboard, under **Kiosk Credentials**, generate credentials for the
+   terminal. The API key is shown once and never again.
+2. Open `/kiosk`, enter that **Device Identifier** and **API Key** plus an
+   optional location, then press **Connect**. That calls
+   `POST /api/hardware/heartbeat`, which marks the device `ACTIVE`. The kiosk
+   re-sends a heartbeat every 60 seconds so `lastHeartbeatAt` stays
+   meaningful, and stores its credentials in `localStorage` so a reload or a
+   reboot comes back ready. **Disconnect** clears them.
+3. Pick the event being checked in. The header shows
    `Checked In: X / Y Total Registrations`, refreshed after every scan.
    Cancelled registrations are excluded from Y.
-3. Scan a badge. The token field is focused on entry and re-focused after
+4. Scan a badge. The token field is focused on entry and re-focused after
    every scan, so an unattended terminal is always ready for the next tap.
 
 ### How this simulates Phase 2 hardware
@@ -183,6 +194,34 @@ re-enabled. Without that the next tap would go nowhere.
 selected event and checks one in directly. It posts the *registration id*, not
 the credential token: the search endpoint never returns tokens, since the token
 is the credential and the endpoint is unauthenticated.
+
+### Hardware security
+
+Every `/api/hardware/*` route requires device credentials, sent as headers:
+
+```
+x-device-identifier: KIOSK-001
+x-device-api-key:    <the key shown once at provisioning>
+```
+
+- Keys are generated with 32 bytes from a CSPRNG and stored only as a scrypt
+  hash, using the same `lib/password.ts` helpers as user passwords. A leaked
+  database cannot be used to impersonate a terminal.
+- Provisioning is an ORGANIZER/ADMIN Server Action, which re-checks the
+  session and role itself — Server Actions are reachable by direct POST.
+- A failed check returns the same `401` whether the device is unknown, was
+  provisioned before key auth existed, or simply sent the wrong key, and an
+  unknown device still pays for a hash comparison. Otherwise response times
+  would reveal which kiosk identifiers exist.
+- `proxy.ts` still exempts `/api/hardware` from the *session* check. That is
+  not public access: a kiosk is an appliance with no user session, so the
+  cookie check would reject it before it could present its own credentials.
+
+Verifying the key costs roughly 45 ms per request, which is scrypt doing its
+job. That is comfortable for a kiosk. If these endpoints ever serve heavy
+traffic, note that API keys are high-entropy random strings and do not need a
+slow KDF the way user-chosen passwords do — a single SHA-256 would be
+cryptographically sufficient and far cheaper.
 
 ## CI
 
@@ -224,14 +263,15 @@ These are deliberate MVP shortcuts, not oversights:
   the key `dietaryRestriction`, while the API checks an event's *required*
   fields by `CustomField.id`. So an event with required custom fields will
   reject this form until it renders the event's real fields.
-- **The whole `/api/hardware` surface is unauthenticated.**
-  `deviceIdentifier` is an identifier, not a secret. Anyone who can reach
-  these endpoints can check people in, create `Device` rows, read attendance
-  tallies, and — most seriously — **look up attendee names and emails** via
-  `GET /api/hardware/registrations`. The search requires 3 characters and caps
-  results at 10, which slows bulk enumeration but does not prevent it. Give
-  `Device` a hashed API key and require it on every `/api/hardware` route
-  before this is exposed to a venue network.
+- **There is no key rotation.** Provisioning refuses an identifier that
+  already exists, so a lost key means issuing a new device rather than
+  re-keying the old one. Deleting the `Device` row revokes access.
+- **A kiosk keeps its key in `localStorage`.** That is what lets a tablet
+  survive a reload, but it means a stolen tablet is a stolen key. Revoke by
+  deleting the device. Any script injected into the kiosk page could also read
+  it, so keep that page's dependencies boring.
+- **Devices seeded before key auth have `apiKeyHash` null** and cannot
+  authenticate. Re-run `npm run db:seed`, or issue them fresh credentials.
 - **`attendeeName` falls back to the attendee's email** when `User.name` is
   null, since the name is optional.
 - **Passwords use scrypt, not bcrypt.** `lib/password.ts` is the only place

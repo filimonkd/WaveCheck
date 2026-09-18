@@ -12,6 +12,7 @@ import { EventStatus, Role } from "@/lib/generated/prisma/enums";
 import { cn } from "@/lib/utils";
 
 import { CreateEventForm } from "./create-event-form";
+import { GenerateCredentialsForm } from "./generate-credentials-form";
 
 export const metadata = { title: "Dashboard · WaveCheck" };
 
@@ -94,6 +95,15 @@ export default async function DashboardPage() {
         </CardHeader>
         <CardContent>
           <CreateEventForm />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Kiosk Credentials</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <GenerateCredentialsForm />
         </CardContent>
       </Card>
 

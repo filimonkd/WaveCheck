@@ -127,6 +127,10 @@ model Device {
   deviceIdentifier String       @unique
   locationName     String
   status           DeviceStatus @default(OFFLINE)
+  // scrypt hash of the device's API key, in the same format lib/password.ts
+  // writes. Null for devices provisioned before key auth existed; those
+  // cannot authenticate and need new credentials issuing.
+  apiKeyHash       String?
   // Null until the device reports in for the first time.
   lastHeartbeatAt  DateTime?
 }

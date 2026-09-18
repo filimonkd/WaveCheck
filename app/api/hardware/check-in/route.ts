@@ -4,9 +4,9 @@ import { z } from "zod";
 import { apiError, readJson, validationError } from "@/lib/api";
 import { db } from "@/lib/db";
 import { DeviceStatus, RegistrationStatus } from "@/lib/generated/prisma/enums";
+import { validateDeviceAuth } from "@/lib/hardware-auth";
 
 const checkInSchema = z.object({
-  deviceIdentifier: z.string().min(1),
   // A badge scan carries the token; the kiosk's manual fallback sends the
   // registration id instead, so the search endpoint never has to hand out
   // credentials.
@@ -22,17 +22,24 @@ const checkInSchema = z.object({
  * error" and would swallow the message we want shown on the screen. Only a
  * malformed request is a non-2xx.
  *
- * NOTE: this endpoint is unauthenticated — `deviceIdentifier` is an
- * identifier, not a secret. See README before Phase 2 hardware ships.
+ * Requires device credentials. The acting device comes from the validated
+ * headers, never from the body, so a kiosk cannot record a check-in against
+ * someone else's terminal.
  */
 export async function POST(request: Request) {
+  const auth = await validateDeviceAuth(request);
+
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   const parsed = checkInSchema.safeParse(await readJson(request));
 
   if (!parsed.success) {
     return validationError(parsed.error);
   }
 
-  const { deviceIdentifier, credentialToken, registrationId } = parsed.data;
+  const { credentialToken, registrationId } = parsed.data;
 
   const target =
     credentialToken !== undefined
@@ -46,8 +53,8 @@ export async function POST(request: Request) {
   }
 
   // Record that the kiosk is alive, whether or not the scan succeeds.
-  await db.device.updateMany({
-    where: { deviceIdentifier },
+  await db.device.update({
+    where: { id: auth.device.id },
     data: { lastHeartbeatAt: new Date(), status: DeviceStatus.ACTIVE },
   });
 

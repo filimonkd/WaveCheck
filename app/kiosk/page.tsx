@@ -10,10 +10,71 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  DEVICE_API_KEY_HEADER,
+  DEVICE_IDENTIFIER_HEADER,
+} from "@/lib/hardware-headers";
 import { cn } from "@/lib/utils";
 
 const HEARTBEAT_INTERVAL_MS = 60_000;
 const MIN_SEARCH_LENGTH = 3;
+const STORAGE_KEY = "wavecheck.kiosk.credentials";
+
+type Credentials = { deviceIdentifier: string; apiKey: string };
+
+/**
+ * Credentials live in localStorage so a tablet that reloads — or reboots —
+ * comes back ready without a staff member re-entering the key.
+ *
+ * That does mean the key sits in the browser of a public terminal. It is
+ * scoped to one device and revocable by deleting the Device row, but treat a
+ * lost tablet as a lost key. Every accessor is guarded: storage can be
+ * disabled or throw in private browsing.
+ */
+function readStoredCredentials(): Credentials | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+
+    const parsed: unknown = JSON.parse(raw);
+
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      typeof (parsed as Credentials).deviceIdentifier === "string" &&
+      typeof (parsed as Credentials).apiKey === "string"
+    ) {
+      return parsed as Credentials;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredCredentials(credentials: Credentials) {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(credentials));
+  } catch {
+    // Not fatal: the kiosk still works for this session.
+  }
+}
+
+function clearStoredCredentials() {
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Nothing to do.
+  }
+}
+
+function authHeaders(credentials: Credentials): Record<string, string> {
+  return {
+    [DEVICE_IDENTIFIER_HEADER]: credentials.deviceIdentifier,
+    [DEVICE_API_KEY_HEADER]: credentials.apiKey,
+  };
+}
 
 type KioskEvent = {
   id: string;
@@ -82,9 +143,12 @@ function useTones() {
 }
 
 export default function KioskPage() {
-  const [deviceIdentifier, setDeviceIdentifier] = useState("");
+  const [credentials, setCredentials] = useState<Credentials | null>(null);
+  const [restoring, setRestoring] = useState(true);
+
+  const [identifierInput, setIdentifierInput] = useState("");
+  const [apiKeyInput, setApiKeyInput] = useState("");
   const [locationName, setLocationName] = useState("");
-  const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
 
@@ -108,9 +172,11 @@ export default function KioskPage() {
 
   const selectedEvent = events.find((event) => event.id === selectedEventId);
 
-  const refreshEvents = useCallback(async () => {
+  const refreshEvents = useCallback(async (active: Credentials) => {
     try {
-      const response = await fetch("/api/hardware/events");
+      const response = await fetch("/api/hardware/events", {
+        headers: authHeaders(active),
+      });
       if (!response.ok) return;
 
       const body = await response.json();
@@ -124,6 +190,62 @@ export default function KioskPage() {
     }
   }, []);
 
+  /** Authenticate, then load the event list. */
+  const connect = useCallback(
+    async (candidate: Credentials, location?: string) => {
+      const response = await fetch("/api/hardware/heartbeat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(candidate),
+        },
+        body: JSON.stringify(location ? { locationName: location } : {}),
+      });
+
+      const body = await response.json().catch(() => null);
+
+      if (!response.ok || !body?.success) {
+        return { ok: false as const, error: body?.error ?? "Could not register this device." };
+      }
+
+      setLocationName(body.device?.locationName ?? "");
+      await refreshEvents(candidate);
+      setCredentials(candidate);
+
+      return { ok: true as const };
+    },
+    [refreshEvents],
+  );
+
+  /** Come back authenticated after a reload, or fall back to provisioning. */
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const stored = readStoredCredentials();
+
+        if (stored) {
+          const result = await connect(stored);
+
+          // Credentials that no longer work are worse than none: clear them
+          // so staff are prompted rather than left at a dead terminal.
+          if (!cancelled && !result.ok) {
+            clearStoredCredentials();
+          }
+        }
+      } catch {
+        // Offline at boot: keep the stored key and let staff retry.
+      } finally {
+        if (!cancelled) setRestoring(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [connect]);
+
   /**
    * Keep the scanner focused: on entry, and after every scan.
    *
@@ -134,20 +256,23 @@ export default function KioskPage() {
    * makes this reliable.
    */
   useEffect(() => {
-    if (connected && !scanning) {
+    if (credentials && !scanning) {
       tokenInputRef.current?.focus();
     }
-  }, [connected, scanning, focusNonce]);
+  }, [credentials, scanning, focusNonce]);
 
   /** Keep the Device row alive while this terminal is on. */
   useEffect(() => {
-    if (!connected) return;
+    if (!credentials) return;
 
     const beat = () => {
       void fetch("/api/hardware/heartbeat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ deviceIdentifier }),
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(credentials),
+        },
+        body: "{}",
       }).catch(() => {
         // A missed beat is not worth interrupting check-in for.
       });
@@ -155,7 +280,7 @@ export default function KioskPage() {
 
     const timer = setInterval(beat, HEARTBEAT_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [connected, deviceIdentifier]);
+  }, [credentials]);
 
   async function handleConnect(formEvent: React.FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
@@ -163,31 +288,37 @@ export default function KioskPage() {
     setConnectError(null);
     prime();
 
+    const candidate: Credentials = {
+      deviceIdentifier: identifierInput.trim(),
+      apiKey: apiKeyInput.trim(),
+    };
+
     try {
-      const response = await fetch("/api/hardware/heartbeat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          deviceIdentifier: deviceIdentifier.trim(),
-          ...(locationName.trim() ? { locationName: locationName.trim() } : {}),
-        }),
-      });
+      const result = await connect(candidate, locationName.trim() || undefined);
 
-      const body = await response.json();
-
-      if (!response.ok || !body.success) {
-        setConnectError(body?.error ?? "Could not register this device.");
+      if (!result.ok) {
+        setConnectError(result.error);
         return;
       }
 
-      setLocationName(body.device?.locationName ?? "");
-      await refreshEvents();
-      setConnected(true);
+      writeStoredCredentials(candidate);
+      setApiKeyInput("");
     } catch {
       setConnectError("Could not reach the server.");
     } finally {
       setConnecting(false);
     }
+  }
+
+  function handleDisconnect() {
+    clearStoredCredentials();
+    setCredentials(null);
+    setEvents([]);
+    setSelectedEventId("");
+    setOutcome(null);
+    setToken("");
+    setResults(null);
+    setApiKeyInput("");
   }
 
   const finishScan = useCallback(
@@ -202,13 +333,18 @@ export default function KioskPage() {
 
   const checkIn = useCallback(
     async (payload: { credentialToken?: string; registrationId?: string }) => {
+      if (!credentials) return;
+
       setScanning(true);
 
       try {
         const response = await fetch("/api/hardware/check-in", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ deviceIdentifier, ...payload }),
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders(credentials),
+          },
+          body: JSON.stringify(payload),
         });
 
         const body = await response.json();
@@ -249,7 +385,7 @@ export default function KioskPage() {
           });
         }
 
-        await refreshEvents();
+        await refreshEvents(credentials);
       } catch {
         finishScan({
           ok: false,
@@ -260,7 +396,7 @@ export default function KioskPage() {
         setScanning(false);
       }
     },
-    [deviceIdentifier, finishScan, refreshEvents],
+    [credentials, finishScan, refreshEvents],
   );
 
   /** The RFID wedge types the token then presses Enter, which submits this. */
@@ -274,6 +410,7 @@ export default function KioskPage() {
 
   async function handleSearch(formEvent: React.FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
+    if (!credentials) return;
     if (query.trim().length < MIN_SEARCH_LENGTH || !selectedEventId) return;
 
     setSearching(true);
@@ -283,7 +420,9 @@ export default function KioskPage() {
         eventId: selectedEventId,
         q: query.trim(),
       });
-      const response = await fetch(`/api/hardware/registrations?${params}`);
+      const response = await fetch(`/api/hardware/registrations?${params}`, {
+        headers: authHeaders(credentials),
+      });
       const body = await response.json();
       setResults(response.ok ? (body.registrations ?? []) : []);
     } catch {
@@ -301,8 +440,17 @@ export default function KioskPage() {
     setFocusNonce((nonce) => nonce + 1);
   }
 
+  // --- Restoring stored credentials -----------------------------------------
+  if (restoring) {
+    return (
+      <main className="mx-auto flex min-h-dvh max-w-lg items-center justify-center p-6">
+        <p className="text-muted-foreground text-sm">Starting up…</p>
+      </main>
+    );
+  }
+
   // --- State 1: provisioning -------------------------------------------------
-  if (!connected) {
+  if (!credentials) {
     return (
       <main className="mx-auto flex min-h-dvh max-w-lg items-center p-6">
         <Card className="w-full">
@@ -318,12 +466,32 @@ export default function KioskPage() {
                 <Input
                   id="deviceIdentifier"
                   name="deviceIdentifier"
-                  value={deviceIdentifier}
-                  onChange={(event) => setDeviceIdentifier(event.target.value)}
+                  value={identifierInput}
+                  onChange={(event) => setIdentifierInput(event.target.value)}
                   placeholder="KIOSK-001"
+                  autoComplete="off"
                   required
                   autoFocus
                 />
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="apiKey" className="text-sm font-medium">
+                  API Key
+                </label>
+                <Input
+                  id="apiKey"
+                  name="apiKey"
+                  type="password"
+                  value={apiKeyInput}
+                  onChange={(event) => setApiKeyInput(event.target.value)}
+                  placeholder="From the organizer dashboard"
+                  autoComplete="off"
+                  required
+                />
+                <p className="text-muted-foreground text-xs">
+                  Generated under Kiosk Credentials on the dashboard.
+                </p>
               </div>
 
               <div className="space-y-1.5">
@@ -363,13 +531,18 @@ export default function KioskPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Check-in</h1>
           <p className="text-muted-foreground text-sm">
-            {deviceIdentifier}
+            {credentials.deviceIdentifier}
             {locationName ? ` · ${locationName}` : ""}
           </p>
         </div>
-        <Button variant="outline" onClick={handleReset} type="button">
-          Reset
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={handleReset} type="button">
+            Reset
+          </Button>
+          <Button variant="ghost" onClick={handleDisconnect} type="button">
+            Disconnect
+          </Button>
+        </div>
       </header>
 
       <Card>
