@@ -1,8 +1,13 @@
 # WaveCheck
 
-Event / conference registration system. **Phase 1 is software only**; the
-`Device` model is already in place for the Phase 2 hardware check-in terminals
-(QR / RFID readers).
+Event / conference registration system: organizers publish events, attendees
+register and receive a credential token, and a terminal at the door checks
+them in.
+
+Both phases are in place. The software runs on its own — `/kiosk` turns any
+tablet into a check-in terminal — and physical RFID readers are supported,
+either through that page or through [`hardware-bridge/`](hardware-bridge/README.md)
+for serial readers.
 
 ## Stack
 
@@ -18,37 +23,53 @@ Event / conference registration system. **Phase 1 is software only**; the
 ## Layout
 
 ```
-app/dashboard/               organizer dashboard (RSC) + Server Action
-app/kiosk/                   check-in terminal (client component)
-hardware-bridge/             standalone serial RFID bridge (own package.json)
-app/register/[eventId]/      public registration page (RSC) + client form
-app/api/auth/[...nextauth]/  Auth.js route handler
-app/api/events/              GET (public) + POST (organizers)
-app/api/registrations/       POST (public for now)
-app/api/hardware/check-in/   POST — Phase 2 kiosk endpoint
-components/ui/               shadcn/ui components
-lib/auth.ts                  Auth.js config; exports auth/signIn/signOut
-lib/db.ts                    Prisma client singleton
-lib/password.ts              password hashing (scrypt)
-lib/api.ts                   shared JSON response helpers
-lib/session-cookie.ts        cookie names shared with proxy.ts
-lib/utils.ts                 cn() class-name helper
-lib/generated/prisma         generated Prisma client (gitignored)
-proxy.ts                     route protection (Next 16's middleware)
-prisma/schema.prisma         database schema
-prisma/seed.ts               demo data for local development
-types/next-auth.d.ts         session/JWT type augmentation
+app/
+  dashboard/                  organizer dashboard (RSC) + Server Actions
+  kiosk/                      check-in terminal (client component)
+  register/[eventId]/         public registration page (RSC) + client form
+  api/auth/[...nextauth]/     Auth.js route handler
+  api/events/                 GET (public) + POST (organizers)
+  api/registrations/          POST (public, self-identifying)
+  api/hardware/check-in/      POST — check in by token or registration id
+  api/hardware/heartbeat/     POST — mark a kiosk ACTIVE
+  api/hardware/events/        GET — events with live check-in tallies
+  api/hardware/registrations/ GET — name/email lookup for manual check-in
+components/ui/                shadcn/ui components
+lib/auth.ts                   Auth.js config; exports auth/signIn/signOut
+lib/db.ts                     Prisma client, built on first use
+lib/password.ts               scrypt hashing for passwords and device keys
+lib/hardware-auth.ts          device credential check for /api/hardware
+lib/hardware-headers.ts       header names, server-free for the kiosk bundle
+lib/api.ts                    shared JSON response helpers
+lib/session-cookie.ts         cookie names shared with proxy.ts
+lib/utils.ts                  cn() class-name helper
+lib/generated/prisma          generated Prisma client (gitignored)
+proxy.ts                      route protection (Next 16's middleware)
+prisma/schema.prisma          database schema
+prisma/seed.ts                demo data for local development
+types/next-auth.d.ts          session/JWT type augmentation
+hardware-bridge/              standalone serial RFID bridge (own package.json)
+.github/workflows/ci.yml      typecheck, lint and build on every PR
 ```
 
 ## Getting started
 
+You need **PostgreSQL** running locally and **Node.js 20.9 or newer** (Next 16
+and the bridge both require it).
+
 ```bash
 npm install                 # postinstall runs `prisma generate`
-cp .env.example .env        # then fill in DATABASE_URL and NEXTAUTH_SECRET
-npm run db:migrate          # create the initial migration + tables
+cp .env.example .env        # fill in all three variables — see below
+npm run db:migrate          # creates the database if absent, applies migrations
 npm run db:seed             # demo organizer, attendee, event, kiosk
-npm run dev
+npm run dev                 # http://localhost:3000
 ```
+
+`.env.example` carries three variables and all three matter. `AUTH_URL` is the
+easiest to skip and the most confusing to debug: without it Auth.js refuses to
+trust the incoming Host header, and every `/api/auth` request fails with
+`UntrustedHost`. It bites production builds rather than `next dev`, so an app
+that works locally can break on deploy.
 
 The seed creates two logins (`organizer@wavecheck.test` and
 `attendee@wavecheck.test`, both with password `password123`), a published
@@ -63,11 +84,14 @@ dashboard, and it is the only place a key is ever readable.
 | --------------------- | ---------------------------------------- |
 | `npm run dev`          | Dev server                               |
 | `npm run build`        | Production build                         |
-| `npm run typecheck`    | `tsc --noEmit`                           |
+| `npm start`            | Serve a production build                 |
+| `npm run typecheck`    | `next typegen && tsc --noEmit`           |
 | `npm run lint`         | ESLint                                   |
 | `npm run db:migrate`   | Create + apply a migration (development) |
+| `npm run db:seed`      | Load the demo data                       |
 | `npm run db:deploy`    | Apply migrations (production)            |
 | `npm run db:generate`  | Regenerate the Prisma client             |
+| `npm run db:push`      | Push the schema without a migration      |
 | `npm run db:studio`    | Prisma Studio                            |
 
 ## Notes on Prisma 7
@@ -88,10 +112,14 @@ const events = await db.event.findMany({ include: { customFields: true } });
 
 ## Data model
 
-`User` → organizes many `Event`s, and has many `Registration`s.
+`User` → organizes many `Event`s, and has many `Registration`s. `name` is
+optional, so anything displaying an attendee falls back to their email.
 `Event` → has many `CustomField`s and `Registration`s.
-`Registration` carries a unique `credentialToken` (the future QR / RFID
-credential) and a `customFieldResponses` JSON blob keyed by `CustomField` id.
+`Registration` carries a unique `credentialToken` — the credential a reader
+scans — and a `customFieldResponses` JSON blob keyed by `CustomField` id.
+`Device` is a check-in terminal: a `deviceIdentifier`, an `apiKeyHash`, and
+`lastHeartbeatAt` for whether it is alive. It stands apart from the others,
+with no relations into them.
 
 Deleting an `Event` cascades to its `CustomField`s and `Registration`s.
 Deleting a `User` cascades to their `Registration`s, but is **restricted**
@@ -128,15 +156,16 @@ Every business outcome returns HTTP 200 and a `success` flag, because kiosk
 firmware tends to collapse non-2xx responses into a generic network error and
 swallow the message meant for the screen. Only a malformed body is a 400.
 
-| Case                        | Response                                              |
-| --------------------------- | ----------------------------------------------------- |
-| Valid, not yet checked in   | `{"success":true,"attendeeName":"..."}`               |
-| Already checked in          | `{"success":false,"message":"Already checked in"}`    |
-| Unknown token               | `{"success":false,"message":"Invalid credential"}`    |
-| Cancelled registration      | `{"success":false,"message":"Registration cancelled"}`|
+| Case                      | Response                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------- |
+| Valid, not yet checked in | `{"success":true,"attendeeName":"...","checkedInAt":"..."}`                     |
+| Already checked in        | `{"success":false,"message":"Already checked in","checkedInAt":"...","attendeeName":"..."}` |
+| Unknown token             | `{"success":false,"message":"Invalid credential"}`                              |
+| Cancelled registration    | `{"success":false,"message":"Registration cancelled","attendeeName":"..."}`     |
 
-A known `deviceIdentifier` also updates that `Device`'s `lastHeartbeatAt` and
-marks it `ACTIVE`.
+`checkedInAt` on a repeat scan is what lets a terminal say *when* someone came
+through rather than only that they did. Every call also refreshes the calling
+`Device`'s `lastHeartbeatAt` and marks it `ACTIVE`.
 
 ## Registering
 
@@ -197,13 +226,14 @@ Using it:
 4. Scan a badge. The token field is focused on entry and re-focused after
    every scan, so an unattended terminal is always ready for the next tap.
 
-### How this simulates Phase 2 hardware
+### Keyboard-wedge readers
 
 A keyboard-wedge RFID reader behaves like a very fast keyboard: it types the
 credential and presses Enter. The token field is therefore an ordinary text
 input inside a `<form>`, so the reader's Enter submits it with no key handling
-of its own — the same code path a human typing a token uses. When real readers
-arrive they need no application change; they just type into the focused field.
+of its own — the same code path a human typing a token uses. Such a reader
+needs no software on the machine at all: it just types into the focused
+field.
 
 Because the field is disabled while a check-in is in flight, and a disabled
 element cannot take focus, the focus effect also re-runs when the field is
@@ -211,10 +241,10 @@ re-enabled. Without that the next tap would go nowhere.
 
 **Manual fallback.** "Search by Email/Name" looks up registrations for the
 selected event and checks one in directly. It posts the *registration id*, not
-the credential token: the search endpoint never returns tokens, since the token
-is the credential and the endpoint is unauthenticated.
+the credential token. The search endpoint never returns tokens at all: a token
+is a credential, and nothing needs to hand one out to read a name.
 
-### Phase 2: hardware integration
+## Hardware integration
 
 Physical readers are supported. Which part of WaveCheck you need depends on
 what the reader pretends to be:
@@ -235,7 +265,7 @@ jumper or a microcontroller in front of it), getting a device key from the
 dashboard, running it under systemd, and testing the whole path with `socat`
 virtual serial ports instead of hardware.
 
-### Hardware security
+## Hardware security
 
 Every `/api/hardware/*` route requires device credentials, sent as headers:
 
